@@ -1,12 +1,16 @@
 package ee.taltech.inbankbackend.service;
 
+import com.github.vladislavgoltjajev.personalcode.exception.PersonalCodeException;
 import com.github.vladislavgoltjajev.personalcode.locale.estonia.EstonianPersonalCodeValidator;
+import com.github.vladislavgoltjajev.personalcode.locale.estonia.EstonianPersonalCodeParser;
 import ee.taltech.inbankbackend.config.DecisionEngineConstants;
-import ee.taltech.inbankbackend.exceptions.InvalidLoanAmountException;
-import ee.taltech.inbankbackend.exceptions.InvalidLoanPeriodException;
-import ee.taltech.inbankbackend.exceptions.InvalidPersonalCodeException;
-import ee.taltech.inbankbackend.exceptions.NoValidLoanException;
+import ee.taltech.inbankbackend.exceptions.*;
 import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.Period;
 
 /**
  * A service class that provides a method for calculating an approved loan amount and period for a customer.
@@ -18,6 +22,10 @@ public class DecisionEngine {
 
     // Used to check for the validity of the presented ID code.
     private final EstonianPersonalCodeValidator validator = new EstonianPersonalCodeValidator();
+
+    private final EstonianPersonalCodeParser parser = new EstonianPersonalCodeParser();
+
+
     private int creditModifier = 0;
 
     /**
@@ -37,32 +45,65 @@ public class DecisionEngine {
      */
     public Decision calculateApprovedLoan(String personalCode, Long loanAmount, int loanPeriod)
             throws InvalidPersonalCodeException, InvalidLoanAmountException, InvalidLoanPeriodException,
-            NoValidLoanException {
+            NoValidLoanException, UnderagePersonalCodeException {
+
         try {
             verifyInputs(personalCode, loanAmount, loanPeriod);
         } catch (Exception e) {
             return new Decision(null, null, e.getMessage());
         }
 
-        int outputLoanAmount;
+        try {
+            validateAge(personalCode);
+        } catch (Exception e) {
+            return new Decision(null, null, e.getMessage());
+        }
+
         creditModifier = getCreditModifier(personalCode);
 
         if (creditModifier == 0) {
             throw new NoValidLoanException("No valid loan found!");
         }
 
-        while (highestValidLoanAmount(loanPeriod) < DecisionEngineConstants.MINIMUM_LOAN_AMOUNT) {
-            loanPeriod++;
-        }
+        int outputLoanAmount;
+        BigDecimal creditScore;
 
-        if (loanPeriod <= DecisionEngineConstants.MAXIMUM_LOAN_PERIOD) {
-            outputLoanAmount = Math.min(DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT, highestValidLoanAmount(loanPeriod));
-        } else {
-            throw new NoValidLoanException("No valid loan found!");
+        while (true) {
+            creditScore = calculateCreditScore(creditModifier, loanAmount, loanPeriod);
+            BigDecimal threshold = BigDecimal.ONE;
+            if (creditScore.compareTo(threshold) >= 0) {
+                outputLoanAmount = Math.min(highestValidLoanAmount(loanPeriod), DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT);
+                break;
+            } else {
+                loanPeriod++;
+                if (loanPeriod > DecisionEngineConstants.MAXIMUM_LOAN_PERIOD) {
+                    throw new NoValidLoanException("No suitable loan amount found for the given period!");
+                }
+            }
         }
 
         return new Decision(outputLoanAmount, loanPeriod, null);
+
+
+//        Intern implementation:
+//        while (highestValidLoanAmount(loanPeriod) < DecisionEngineConstants.MINIMUM_LOAN_AMOUNT) {
+//            loanPeriod++;
+//        }
+//
+//        if (loanPeriod <= DecisionEngineConstants.MAXIMUM_LOAN_PERIOD) {
+//            outputLoanAmount = Math.min(DecisionEngineConstants.MAXIMUM_LOAN_AMOUNT, highestValidLoanAmount(loanPeriod));
+//        } else {
+//            throw new NoValidLoanException("No valid loan found!");
+//        }
     }
+
+
+    private BigDecimal calculateCreditScore(int creditModifier, Long loanAmount, int loanPeriod) {
+        BigDecimal modifier = BigDecimal.valueOf(creditModifier);
+        BigDecimal amount = BigDecimal.valueOf(loanAmount);
+        BigDecimal period = BigDecimal.valueOf(loanPeriod);
+
+        return modifier.divide(amount, 10, RoundingMode.HALF_UP).multiply(period);    }
 
     /**
      * Calculates the largest valid loan for the current credit modifier and loan period.
@@ -123,5 +164,17 @@ public class DecisionEngine {
             throw new InvalidLoanPeriodException("Invalid loan period!");
         }
 
+    }
+
+    private void validateAge(String personalCode) throws PersonalCodeException, UnderagePersonalCodeException {
+        LocalDate dateOfBirth = parser.getDateOfBirth(personalCode);
+
+        LocalDate currentDate = LocalDate.now();
+
+        int age = Period.between(dateOfBirth, currentDate).getYears();
+
+        if (age < 18 || age > 80) {
+            throw new UnderagePersonalCodeException("Customer age is outside the approved age range for loans.");
+        }
     }
 }
